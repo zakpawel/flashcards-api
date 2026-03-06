@@ -21,9 +21,6 @@ case class Flashcard(
     updatedAt: Instant,
 ) derives DbCodec
 
-case class CreateFlashcard(front: String, back: String, category: Option[String])
-case class UpdateFlashcard(front: Option[String], back: Option[String], category: Option[String])
-
 // ── JSON helpers ──────────────────────────────────────────────────────────────
 
 def flashcardJson(f: Flashcard): Obj =
@@ -31,21 +28,32 @@ def flashcardJson(f: Flashcard): Obj =
     "id"        -> f.id.toString,
     "front"     -> f.front,
     "back"      -> f.back,
-    "category"  -> f.category.fold(Null: Value)(Str(_)),
+    "category"  -> f.category.fold[Value](Null)(Str(_)),
     "createdAt" -> f.createdAt.toString,
     "updatedAt" -> f.updatedAt.toString,
   )
 
+def jsonResponse(v: Value, status: Int = 200): Response[String] =
+  Response(v.toString, statusCode = status, headers = Seq("Content-Type" -> "application/json"))
+
+def notFound(id: String): Response[String] =
+  jsonResponse(Obj("error" -> s"Flashcard $id not found"), status = 404)
+
 // ── Database setup ────────────────────────────────────────────────────────────
 
 object Db:
-  private val cfg = HikariConfig()
-  cfg.setJdbcUrl(
+  private val jdbcUrl =
     sys.env.getOrElse(
       "DATABASE_URL",
-      s"jdbc:postgresql://${sys.env.getOrElse("DB_HOST", "localhost")}:${sys.env.getOrElse("DB_PORT", "5432")}/${sys.env.getOrElse("DB_NAME", "flashcards")}?user=${sys.env.getOrElse("DB_USER", "postgres")}&password=${sys.env.getOrElse("DB_PASSWORD", "postgres")}"
+      s"jdbc:postgresql://${sys.env.getOrElse("DB_HOST","localhost")}:" +
+      s"${sys.env.getOrElse("DB_PORT","5432")}/" +
+      s"${sys.env.getOrElse("DB_NAME","flashcards")}?" +
+      s"user=${sys.env.getOrElse("DB_USER","postgres")}&" +
+      s"password=${sys.env.getOrElse("DB_PASSWORD","postgres")}"
     )
-  )
+
+  private val cfg = HikariConfig()
+  cfg.setJdbcUrl(jdbcUrl)
   cfg.setMaximumPoolSize(10)
   val ds = HikariDataSource(cfg)
 
@@ -65,7 +73,11 @@ object Main extends cask.MainRoutes:
 
   Db.migrate()
 
-  // ── GET /api/v1/flashcards?category=xxx ────────────────────────────────────
+  // GET / – health check
+  @cask.get("/")
+  def health() = "Flashcards API is running"
+
+  // GET /api/v1/flashcards?category=xxx
   @cask.get("/api/v1/flashcards")
   def listFlashcards(category: String = ""): Response[String] =
     val cards = connect(Db.ds) {
@@ -75,71 +87,54 @@ object Main extends cask.MainRoutes:
         sql"SELECT * FROM flashcards WHERE category = $category ORDER BY created_at DESC"
           .query[Flashcard].run()
     }
-    Response(
-      Arr(cards.map(flashcardJson)*).toString,
-      headers = Seq("Content-Type" -> "application/json"),
-    )
+    jsonResponse(Arr(cards.map(flashcardJson)*))
 
-  // ── GET /api/v1/flashcards/:id ─────────────────────────────────────────────
+  // GET /api/v1/flashcards/:id
   @cask.get("/api/v1/flashcards/:id")
   def getFlashcard(id: String): Response[String] =
     val uuid = UUID.fromString(id)
     connect(Db.ds) {
-      sql"SELECT * FROM flashcards WHERE id = $uuid".query[Flashcard].runOption()
+      sql"SELECT * FROM flashcards WHERE id = $uuid".query[Flashcard].run().headOption
     } match
-      case Some(f) =>
-        Response(flashcardJson(f).toString, headers = Seq("Content-Type" -> "application/json"))
-      case None =>
-        Response(Obj("error" -> s"Flashcard $id not found").toString, statusCode = 404,
-          headers = Seq("Content-Type" -> "application/json"))
+      case Some(f) => jsonResponse(flashcardJson(f))
+      case None    => notFound(id)
 
-  // ── POST /api/v1/flashcards ────────────────────────────────────────────────
+  // POST /api/v1/flashcards  { "front": "...", "back": "...", "category": "..." }
   @cask.postJson("/api/v1/flashcards")
   def createFlashcard(front: String, back: String, category: String = ""): Response[String] =
-    val cat = if category.isEmpty then None else Some(category)
+    val cat = Option(category).filter(_.nonEmpty)
     val card = connect(Db.ds) {
-      sql"""
-        INSERT INTO flashcards (front, back, category)
-        VALUES ($front, $back, $cat)
-        RETURNING *
-      """.query[Flashcard].run().head
+      sql"""INSERT INTO flashcards (front, back, category)
+            VALUES ($front, $back, $cat)
+            RETURNING *""".query[Flashcard].run().head
     }
-    Response(
-      flashcardJson(card).toString,
-      statusCode = 201,
-      headers = Seq("Content-Type" -> "application/json"),
-    )
+    jsonResponse(flashcardJson(card), status = 201)
 
-  // ── PATCH /api/v1/flashcards/:id ───────────────────────────────────────────
-  @cask.patchJson("/api/v1/flashcards/:id")
-  def updateFlashcard(
-      id: String,
-      front: Option[String] = None,
-      back: Option[String] = None,
-      category: Option[String] = None,
-  ): Response[String] =
+  // PATCH /api/v1/flashcards/:id  – raw body JSON, all fields optional
+  @cask.patch("/api/v1/flashcards/:id")
+  def updateFlashcard(id: String, request: cask.Request): Response[String] =
     val uuid = UUID.fromString(id)
+    val body = ujson.read(request.bytes).obj
     connect(Db.ds) {
-      sql"SELECT * FROM flashcards WHERE id = $uuid".query[Flashcard].runOption()
+      sql"SELECT * FROM flashcards WHERE id = $uuid".query[Flashcard].run().headOption
     } match
-      case None =>
-        Response(Obj("error" -> s"Flashcard $id not found").toString, statusCode = 404,
-          headers = Seq("Content-Type" -> "application/json"))
+      case None => notFound(id)
       case Some(existing) =>
-        val newFront    = front.getOrElse(existing.front)
-        val newBack     = back.getOrElse(existing.back)
-        val newCategory = category.orElse(existing.category)
+        val newFront    = body.get("front").map(_.str).getOrElse(existing.front)
+        val newBack     = body.get("back").map(_.str).getOrElse(existing.back)
+        val newCategory = body.get("category") match
+          case Some(Null)    => None
+          case Some(s: Str)  => Some(s.str)
+          case _             => existing.category
         val updated = connect(Db.ds) {
-          sql"""
-            UPDATE flashcards
-            SET front = $newFront, back = $newBack, category = $newCategory, updated_at = now()
-            WHERE id = $uuid
-            RETURNING *
-          """.query[Flashcard].run().head
+          sql"""UPDATE flashcards
+                SET front = $newFront, back = $newBack, category = $newCategory, updated_at = now()
+                WHERE id = $uuid
+                RETURNING *""".query[Flashcard].run().head
         }
-        Response(flashcardJson(updated).toString, headers = Seq("Content-Type" -> "application/json"))
+        jsonResponse(flashcardJson(updated))
 
-  // ── DELETE /api/v1/flashcards/:id ──────────────────────────────────────────
+  // DELETE /api/v1/flashcards/:id
   @cask.delete("/api/v1/flashcards/:id")
   def deleteFlashcard(id: String): Response[String] =
     val uuid = UUID.fromString(id)
@@ -147,11 +142,6 @@ object Main extends cask.MainRoutes:
       sql"DELETE FROM flashcards WHERE id = $uuid".update.run()
     }
     if rows > 0 then Response("", statusCode = 204)
-    else Response(Obj("error" -> s"Flashcard $id not found").toString, statusCode = 404,
-      headers = Seq("Content-Type" -> "application/json"))
-
-  // ── GET / – health check ───────────────────────────────────────────────────
-  @cask.get("/")
-  def health(): String = "Flashcards API is running"
+    else notFound(id)
 
   initialize()
