@@ -6,7 +6,7 @@ import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import org.flywaydb.core.Flyway
 import ujson.*
 
-import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.UUID
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -17,8 +17,8 @@ case class Flashcard(
     front: String,
     back: String,
     category: Option[String],
-    createdAt: Instant,
-    updatedAt: Instant,
+    createdAt: OffsetDateTime,
+    updatedAt: OffsetDateTime,
 ) derives DbCodec
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────
@@ -29,8 +29,8 @@ def flashcardJson(f: Flashcard): Obj =
     "front"     -> f.front,
     "back"      -> f.back,
     "category"  -> f.category.fold[Value](Null)(Str(_)),
-    "createdAt" -> f.createdAt.toString,
-    "updatedAt" -> f.updatedAt.toString,
+    "createdAt" -> f.createdAt.toInstant.toString,
+    "updatedAt" -> f.updatedAt.toInstant.toString,
   )
 
 def jsonResponse(v: Value, status: Int = 200): Response[String] =
