@@ -1,9 +1,8 @@
-# The native binary is built by CI (sbt GraalVMNativeImage/packageBin)
-# and passed into this image via a build artifact.
-FROM gcr.io/distroless/base-debian12
+# Runtime image: static musl binary needs no libc → FROM scratch
+FROM scratch
 WORKDIR /app
 
-COPY target/graalvm-native-image/flashcards flashcards
+COPY target/x86_64-unknown-linux-musl/release/flashcards flashcards
 
 EXPOSE 8080
 

@@ -1,7 +1,7 @@
--- Flyway migration: V1__create_flashcards.sql
+-- sqlx migration: 0001_create_flashcards.sql
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-CREATE TABLE flashcards (
+CREATE TABLE IF NOT EXISTS flashcards (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     front       TEXT        NOT NULL,
     back        TEXT        NOT NULL,
@@ -10,4 +10,4 @@ CREATE TABLE flashcards (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_flashcards_category ON flashcards (category);
+CREATE INDEX IF NOT EXISTS idx_flashcards_category ON flashcards (category);

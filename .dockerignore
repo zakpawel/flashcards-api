@@ -1,7 +1,10 @@
 .dockerignore
 target/
-!target/graalvm-native-image/flashcards
-.bsp/
-.metals/
+!target/x86_64-unknown-linux-musl/release/flashcards
+.git/
 .idea/
-*.class
+*.md
+src/
+migrations/
+Cargo.toml
+Cargo.lock
