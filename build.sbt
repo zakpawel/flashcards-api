@@ -1,15 +1,5 @@
 import com.typesafe.sbt.packager.docker.DockerChmodType
 
-val zioVersion        = "2.1.13"
-val zioHttpVersion    = "3.0.1"
-val tapirVersion      = "1.11.9"
-val skunkVersion      = "0.6.4"
-val zioJsonVersion    = "0.7.3"
-val flywayVersion     = "10.20.1"
-val postgresVersion   = "42.7.4"
-val zioConfigVersion  = "4.0.3"
-val logbackVersion    = "1.5.12"
-
 lazy val root = (project in file("."))
   .enablePlugins(JavaAppPackaging, DockerPlugin)
   .settings(
@@ -19,52 +9,43 @@ lazy val root = (project in file("."))
     organization := "com.flashcards",
 
     libraryDependencies ++= Seq(
-      // ZIO core
-      "dev.zio" %% "zio"         % zioVersion,
-      "dev.zio" %% "zio-streams" % zioVersion,
+      // HTTP server – minimalistyczny, zero-dep
+      "com.lihaoyi"    %% "cask"       % "0.11.3",
 
-      // ZIO HTTP
-      "dev.zio" %% "zio-http" % zioHttpVersion,
+      // Type-safe SQL DSL dla Scala 3
+      "com.augustnagro" %% "magnum"    % "1.3.1",
 
-      // Tapir – endpoints + ZIO HTTP server + OpenAPI
-      "com.softwaremill.sttp.tapir" %% "tapir-zio-http-server"  % tapirVersion,
-      "com.softwaremill.sttp.tapir" %% "tapir-json-zio"         % tapirVersion,
-      "com.softwaremill.sttp.tapir" %% "tapir-swagger-ui-bundle" % tapirVersion,
-      "com.softwaremill.sttp.tapir" %% "tapir-openapi-docs"     % tapirVersion,
+      // Connection pool
+      "com.zaxxer"      %  "HikariCP"  % "5.1.0",
 
-      // Skunk – type-safe Postgres DSL (pure functional, no JDBC)
-      "org.tpolecat" %% "skunk-core"       % skunkVersion,
-      "dev.zio"      %% "zio-interop-catz" % "23.1.0.3",
+      // PostgreSQL driver
+      "org.postgresql"  %  "postgresql" % "42.7.4",
 
-      // ZIO JSON
-      "dev.zio" %% "zio-json" % zioJsonVersion,
+      // Flyway migracje
+      "org.flywaydb"    %  "flyway-core"               % "10.20.1",
+      "org.flywaydb"    %  "flyway-database-postgresql" % "10.20.1",
 
-      // Flyway migrations (JDBC only for startup migration)
-      "org.flywaydb"   % "flyway-core"                % flywayVersion,
-      "org.flywaydb"   % "flyway-database-postgresql"  % flywayVersion,
-      "org.postgresql" % "postgresql"                  % postgresVersion,
-
-      // ZIO Config – czyta env vars / application.conf
-      "dev.zio" %% "zio-config"          % zioConfigVersion,
-      "dev.zio" %% "zio-config-typesafe" % zioConfigVersion,
-      "dev.zio" %% "zio-config-magnolia" % zioConfigVersion,
-
-      // Logging
-      "ch.qos.logback" % "logback-classic" % logbackVersion,
-      "dev.zio"       %% "zio-logging-slf4j2" % "2.3.2",
+      // Logowanie
+      "ch.qos.logback"  %  "logback-classic" % "1.5.12",
     ),
 
-    // Docker / Render deployment
-    Docker / packageName       := "flashcards",
-    Docker / version           := "latest",
-    dockerBaseImage            := "eclipse-temurin:21-jre-alpine",
-    dockerChmodType            := DockerChmodType.UserGroupWriteExecute,
-    dockerExposedPorts         := Seq(8080),
-    dockerUpdateLatest         := true,
+    // sbt-assembly – fat jar, najprostszy deployment
+    assembly / mainClass          := Some("com.flashcards.Main"),
+    assembly / assemblyJarName    := "flashcards.jar",
+    assembly / assemblyMergeStrategy := {
+      case PathList("META-INF", "services", xs @ _*) => MergeStrategy.concat
+      case PathList("META-INF", xs @ _*)             => MergeStrategy.discard
+      case PathList("reference.conf")                => MergeStrategy.concat
+      case _                                         => MergeStrategy.first
+    },
 
-    scalacOptions ++= Seq(
-      "-deprecation",
-      "-feature",
-      "-Wunused:all",
-    ),
+    // Docker
+    Docker / packageName      := "flashcards",
+    Docker / version          := "latest",
+    dockerBaseImage           := "eclipse-temurin:21-jre-alpine",
+    dockerChmodType           := DockerChmodType.UserGroupWriteExecute,
+    dockerExposedPorts        := Seq(8080),
+    dockerUpdateLatest        := true,
+
+    scalacOptions ++= Seq("-deprecation", "-feature"),
   )
