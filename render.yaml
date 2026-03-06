@@ -9,7 +9,7 @@ services:
     # Render pobierze obraz zbudowany przez GitHub Actions lub zbuduje lokalnie
     plan: free                        # zmień na "starter" / "standard" dla produkcji
     region: frankfurt                 # eu-central
-    healthCheckPath: /docs            # Swagger UI jako health check
+    healthCheckPath: /                 # health check
     envVars:
       - key: PORT
         value: "8080"
