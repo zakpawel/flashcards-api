@@ -26,8 +26,8 @@ jobs:
 
       - name: Install sbt
         run: |
-          curl -fL "https://github.com/sbt/sbt/releases/download/v1.10.1/sbt-1.10.1.tgz" | tar xz -C /usr/local
-          echo "/usr/local/sbt/bin" >> $GITHUB_PATH
+          curl -fL "https://github.com/sbt/sbt/releases/download/v1.10.1/sbt-1.10.1.tgz" | tar xz -C "$HOME"
+          echo "$HOME/sbt/bin" >> $GITHUB_PATH
 
       - name: Compile
         run: sbt compile
