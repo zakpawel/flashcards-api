@@ -1,0 +1,42 @@
+# render.yaml – Infrastructure as Code dla Render.com
+# Dokumentacja: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: flashcards-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Render pobierze obraz zbudowany przez GitHub Actions lub zbuduje lokalnie
+    plan: free                        # zmień na "starter" / "standard" dla produkcji
+    region: frankfurt                 # eu-central
+    healthCheckPath: /docs            # Swagger UI jako health check
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: DB_HOST
+        fromDatabase:
+          name: flashcards-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: flashcards-db
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: flashcards-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: flashcards-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: flashcards-db
+          property: password
+
+databases:
+  - name: flashcards-db
+    plan: free                        # 1 GB, 1 month data retention
+    region: frankfurt
+    databaseName: flashcards
+    user: flashcards

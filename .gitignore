@@ -1,0 +1,6 @@
+target/
+.bsp/
+.metals/
+.idea/
+*.class
+.DS_Store
