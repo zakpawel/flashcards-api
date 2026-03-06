@@ -31,7 +31,7 @@ lazy val root = (project in file("."))
     GraalVMNativeImage / mainClass := Some("com.flashcards.Main"),
     graalVMNativeImageOptions ++= Seq(
       "--no-fallback",
-      "--static-nolibc",
+      "-H:+StaticExecutableWithDynamicLibC",
       "--enable-url-protocols=http,https",
       "-H:+ReportExceptionStackTraces",
       "--initialize-at-build-time=org.slf4j",
