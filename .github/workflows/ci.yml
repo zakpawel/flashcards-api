@@ -120,6 +120,7 @@ jobs:
           SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
           EXPECTED_SHA: ${{ github.sha }}
         run: |
+          SERVICE_URL="${SERVICE_URL%/}"
           echo "Waiting for $SERVICE_URL/version to report commit ${EXPECTED_SHA}..."
           MAX_RETRIES=30
           SLEEP_SECONDS=20
