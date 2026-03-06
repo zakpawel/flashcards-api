@@ -15,7 +15,6 @@ object Main extends ZIOAppDefault:
   override val bootstrap: ZLayer[ZIOAppArgs, Any, Any] =
     Runtime.removeDefaultLoggers >>> SLF4J.slf4j
 
-  // Run Flyway migrations on startup (uses plain JDBC)
   private val runMigrations: ZIO[AppConfig, Throwable, Unit] =
     ZIO.serviceWithZIO[AppConfig] { cfg =>
       ZIO.attempt {
@@ -32,8 +31,7 @@ object Main extends ZIOAppDefault:
       }.unit
     }
 
-  // Swagger UI routes (served at /docs)
-  private val swaggerRoutes: List[sttp.tapir.ztapir.ZServerEndpoint[Any, Any]] =
+  private val swaggerEndpoints =
     SwaggerInterpreter()
       .fromEndpoints[Task](Endpoints.all, "Flashcards API", "1.0.0")
 
@@ -44,16 +42,13 @@ object Main extends ZIOAppDefault:
         _   <- runMigrations
         _   <- ZIO.logInfo(s"Starting Flashcards API on port ${cfg.port}")
 
-        // Combine app routes + swagger UI
-        appRoutes     = ZioHttpInterpreter().toHttp(Routes.all)
-        swaggerHttp   = ZioHttpInterpreter().toHttp(swaggerRoutes)
-        httpApp       = (appRoutes ++ swaggerHttp).toHttpApp
+        appRoutes    = ZioHttpInterpreter().toHttp(Routes.all)
+        swaggerHttp  = ZioHttpInterpreter().toHttp(swaggerEndpoints)
+        httpApp      = (appRoutes ++ swaggerHttp).toHttpApp
 
-        _   <- Server
-                 .serve(httpApp)
-                 .provide(
-                   Server.defaultWith(_.port(cfg.port)),
-                 )
+        _ <- Server
+               .serve(httpApp)
+               .provide(Server.defaultWith(_.port(cfg.port)))
       yield ()
 
     program.provide(

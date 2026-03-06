@@ -33,7 +33,8 @@ lazy val root = (project in file("."))
       "com.softwaremill.sttp.tapir" %% "tapir-openapi-docs"     % tapirVersion,
 
       // Skunk – type-safe Postgres DSL (pure functional, no JDBC)
-      "org.tpolecat" %% "skunk-core" % skunkVersion,
+      "org.tpolecat" %% "skunk-core"       % skunkVersion,
+      "dev.zio"      %% "zio-interop-catz" % "23.1.0.3",
 
       // ZIO JSON
       "dev.zio" %% "zio-json" % zioJsonVersion,
@@ -60,14 +61,6 @@ lazy val root = (project in file("."))
     dockerChmodType            := DockerChmodType.UserGroupWriteExecute,
     dockerExposedPorts         := Seq(8080),
     dockerUpdateLatest         := true,
-
-    // Fat-jar dla uproszczonego deployu
-    assembly / assemblyMergeStrategy := {
-      case PathList("META-INF", "services", xs @ _*) => MergeStrategy.concat
-      case PathList("META-INF", xs @ _*)             => MergeStrategy.discard
-      case PathList("reference.conf")                => MergeStrategy.concat
-      case _                                         => MergeStrategy.first
-    },
 
     scalacOptions ++= Seq(
       "-deprecation",

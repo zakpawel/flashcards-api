@@ -1,6 +1,5 @@
 package com.flashcards.repository
 
-import cats.effect.std.Console
 import com.flashcards.config.DbConfig
 import com.flashcards.domain.*
 import natchez.Trace.Implicits.noop
@@ -16,9 +15,10 @@ import java.util.UUID
 // ── Skunk codecs ──────────────────────────────────────────────────────────────
 
 private object Codecs:
-  val flashcardId: Codec[UUID]     = uuid
-  val instant: Codec[Instant]      = timestamptz.imap(_.toInstant)(_.atOffset(java.time.ZoneOffset.UTC))
-  val flashcard: Codec[Flashcard]  =
+  val instant: Codec[Instant] =
+    timestamptz.imap(_.toInstant)(_.atOffset(java.time.ZoneOffset.UTC))
+
+  val flashcard: Codec[Flashcard] =
     (uuid ~ text ~ text ~ text.opt ~ instant ~ instant).imap {
       case id ~ front ~ back ~ category ~ createdAt ~ updatedAt =>
         Flashcard(id, front, back, category, createdAt, updatedAt)
@@ -72,7 +72,7 @@ private object Queries:
   val delete: Command[UUID] =
     sql"DELETE FROM flashcards WHERE id = $uuid".command
 
-// ── Repository trait & live impl ──────────────────────────────────────────────
+// ── Repository trait ──────────────────────────────────────────────────────────
 
 trait FlashcardRepository:
   def getAll: Task[List[Flashcard]]
@@ -82,35 +82,24 @@ trait FlashcardRepository:
   def update(id: UUID, cmd: UpdateFlashcard): Task[Option[Flashcard]]
   def delete(id: UUID): Task[Boolean]
 
+// ── Live implementation ───────────────────────────────────────────────────────
+
 object FlashcardRepository:
+
   val layer: ZLayer[DbConfig, Throwable, FlashcardRepository] =
     ZLayer.scoped {
       for
-        cfg <- ZIO.service[DbConfig]
-        session <- ZIO.fromEither(
-          Right(
-            Session.single[cats.effect.IO](
-              host     = cfg.host,
-              port     = cfg.port,
-              user     = cfg.user,
-              database = cfg.name,
-              password = Some(cfg.password),
-            )
-          )
-        ).flatMap(r => ZIO.succeed(r))
-        // We use a pool for production use
-        pool <- ZIO.scoped {
-          Session
-            .pooled[cats.effect.IO](
-              host     = cfg.host,
-              port     = cfg.port,
-              user     = cfg.user,
-              database = cfg.name,
-              password = Some(cfg.password),
-              max      = 10,
-            )
-            .toScopedZIO
-        }.memoize.flatten
+        cfg  <- ZIO.service[DbConfig]
+        pool <- Session
+                  .pooled[cats.effect.IO](
+                    host     = cfg.host,
+                    port     = cfg.port,
+                    user     = cfg.user,
+                    database = cfg.name,
+                    password = Some(cfg.password),
+                    max      = 10,
+                  )
+                  .toScopedZIO
       yield LiveFlashcardRepository(pool)
     }
 
@@ -131,21 +120,16 @@ private final class LiveFlashcardRepository(
     withSession(_.execute(Queries.getByCategory)(category))
 
   def create(cmd: CreateFlashcard): Task[Flashcard] =
-    withSession(
-      _.unique(Queries.insert)(cmd.front ~ cmd.back ~ cmd.category)
-    )
+    withSession(_.unique(Queries.insert)(cmd.front ~ cmd.back ~ cmd.category))
 
   def update(id: UUID, cmd: UpdateFlashcard): Task[Option[Flashcard]] =
     getById(id).flatMap:
-      case None    => ZIO.none
+      case None => ZIO.none
       case Some(existing) =>
         val newFront    = cmd.front.getOrElse(existing.front)
         val newBack     = cmd.back.getOrElse(existing.back)
         val newCategory = cmd.category.fold(existing.category)(identity)
-        withSession(
-          _.option(Queries.update)(newFront ~ newBack ~ newCategory ~ id)
-        )
+        withSession(_.option(Queries.update)(newFront ~ newBack ~ newCategory ~ id))
 
   def delete(id: UUID): Task[Boolean] =
-    withSession(_.execute(Queries.delete)(id))
-      .map(_.rowsAffected > 0)
+    withSession(_.execute(Queries.delete)(id)).map(_.rowsAffected > 0)

@@ -19,13 +19,12 @@ final case class AppConfig(
 )
 
 object AppConfig:
+  private val descriptor: Config[AppConfig] = deriveConfig[AppConfig]
+
   val layer: ZLayer[Any, Config.Error, AppConfig] =
     ZLayer.fromZIO(
-      read(
-        deriveConfig[AppConfig].from(
-          ConfigProvider.fromEnv(pathDelim = '_', seqDelim = ',').orElse(
-            ConfigProvider.fromResourcePath
-          )
-        )
+      ZIO.config(descriptor).withConfigProvider(
+        ConfigProvider.fromEnv(pathDelim = '_', seqDelim = ',')
+          .orElse(ConfigProvider.fromResourcePath)
       )
     )
