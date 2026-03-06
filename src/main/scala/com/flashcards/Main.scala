@@ -9,6 +9,14 @@ import ujson.*
 import java.time.OffsetDateTime
 import java.util.UUID
 
+// ── Version ───────────────────────────────────────────────────────────────────
+
+val buildSha: String =
+  val props = java.util.Properties()
+  Option(getClass.getClassLoader.getResourceAsStream("version.properties"))
+    .foreach(props.load)
+  props.getProperty("git.sha", "unknown")
+
 // ── Model ─────────────────────────────────────────────────────────────────────
 
 @Table(PostgresDbType, SqlNameMapper.CamelToSnakeCase)
@@ -76,6 +84,11 @@ object Main extends cask.MainRoutes:
   // GET / – health check
   @cask.get("/")
   def health() = "Flashcards API is running"
+
+  // GET /version – deployed commit SHA
+  @cask.get("/version")
+  def version(): Response[String] =
+    jsonResponse(Obj("commit" -> buildSha))
 
   // GET /api/v1/flashcards?category=xxx
   @cask.get("/api/v1/flashcards")

@@ -48,4 +48,12 @@ lazy val root = (project in file("."))
     dockerUpdateLatest        := true,
 
     scalacOptions ++= Seq("-deprecation", "-feature"),
+
+    // Inject git SHA into the jar as a resource file
+    Compile / resourceGenerators += Def.task {
+      val sha  = sys.env.getOrElse("GIT_SHA", "unknown")
+      val file = (Compile / resourceManaged).value / "version.properties"
+      IO.write(file, s"git.sha=$sha\n")
+      Seq(file)
+    }.taskValue,
   )
