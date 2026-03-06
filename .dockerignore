@@ -1,6 +1,6 @@
 .dockerignore
 target/
-!target/scala-3.3.4/flashcards.jar
+!target/native-image/flashcards
 .bsp/
 .metals/
 .idea/

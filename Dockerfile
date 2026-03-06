@@ -1,11 +1,10 @@
-# ── Runtime ───────────────────────────────────────────────────────────────────
-# The fat-jar is built by the CI 'build' job and passed as a build artifact.
-# This stage just packages it into a minimal JRE image.
-FROM eclipse-temurin:21-jre-alpine
+# The native binary is built by CI (sbt GraalVMNativeImage/packageBin)
+# and passed into this image via a build artifact.
+FROM gcr.io/distroless/base-debian12
 WORKDIR /app
 
-COPY target/scala-3.3.4/flashcards.jar app.jar
+COPY target/native-image/flashcards flashcards
 
 EXPOSE 8080
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENTRYPOINT ["/app/flashcards"]

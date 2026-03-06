@@ -1,0 +1,149 @@
+[
+  {
+    "name": "org.flywaydb.core.api.migration.baseline.BaselineMigrationConfigurationExtension",
+    "condition": { "typeReachable": "org.flywaydb.core.api.configuration.ClassicConfiguration" },
+    "allDeclaredFields": true
+  },
+  {
+    "name": "org.flywaydb.core.api.migration.baseline.BaselineMigrationConfigurationExtension",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      { "name": "<init>", "parameterTypes": [] },
+      { "name": "getBaselineMigrationPrefix", "parameterTypes": [] },
+      { "name": "setBaselineMigrationPrefix", "parameterTypes": ["java.lang.String"] }
+    ]
+  },
+  {
+    "name": "org.flywaydb.core.extensibility.ConfigurationExtension",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "org.flywaydb.core.extensibility.Plugin",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "org.flywaydb.core.internal.command.clean.CleanModeConfigurationExtension",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      { "name": "<init>", "parameterTypes": [] },
+      { "name": "getClean", "parameterTypes": [] },
+      { "name": "setClean", "parameterTypes": ["org.flywaydb.core.internal.command.clean.CleanModel"] }
+    ]
+  },
+  {
+    "name": "org.flywaydb.core.internal.command.clean.CleanModel",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.flywaydb.core.internal.command.clean.SchemaModel",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.flywaydb.core.internal.configuration.extensions.DeployScriptFilenameConfigurationExtension",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      { "name": "<init>", "parameterTypes": [] },
+      { "name": "getScriptFilename", "parameterTypes": [] },
+      { "name": "setScriptFilename", "parameterTypes": ["java.lang.String"] }
+    ]
+  },
+  {
+    "name": "org.flywaydb.core.internal.configuration.extensions.PrepareScriptFilenameConfigurationExtension",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      { "name": "<init>", "parameterTypes": [] },
+      { "name": "getScriptFilename", "parameterTypes": [] },
+      { "name": "setScriptFilename", "parameterTypes": ["java.lang.String"] }
+    ]
+  },
+  {
+    "name": "org.flywaydb.core.internal.logging.apachecommons.ApacheCommonsLogCreator",
+    "condition": { "typeReachable": "org.flywaydb.core.internal.util.ClassUtils" },
+    "methods": [{ "name": "<init>", "parameterTypes": [] }]
+  },
+  {
+    "name": "org.flywaydb.core.internal.logging.log4j2.Log4j2LogCreator",
+    "condition": { "typeReachable": "org.flywaydb.core.internal.util.ClassUtils" },
+    "methods": [{ "name": "<init>", "parameterTypes": [] }]
+  },
+  {
+    "name": "org.flywaydb.core.internal.logging.slf4j.Slf4jLogCreator",
+    "condition": { "typeReachable": "org.flywaydb.core.internal.util.ClassUtils" },
+    "methods": [{ "name": "<init>", "parameterTypes": [] }]
+  },
+  {
+    "name": "org.flywaydb.core.internal.proprietaryStubs.LicensingConfigurationExtensionStub",
+    "condition": { "typeReachable": "org.flywaydb.core.api.configuration.ClassicConfiguration" },
+    "allDeclaredFields": true
+  },
+  {
+    "name": "org.flywaydb.core.internal.proprietaryStubs.PATTokenConfigurationExtensionStub",
+    "condition": { "typeReachable": "org.flywaydb.core.api.configuration.ClassicConfiguration" },
+    "allDeclaredFields": true
+  },
+  {
+    "name": "org.flywaydb.core.internal.publishing.PublishingConfigurationExtension",
+    "condition": { "typeReachable": "org.flywaydb.core.api.configuration.ClassicConfiguration" },
+    "allDeclaredFields": true
+  },
+  {
+    "name": "org.flywaydb.core.internal.publishing.PublishingConfigurationExtension",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      { "name": "<init>", "parameterTypes": [] },
+      { "name": "isCheckDriftOnMigrate", "parameterTypes": [] },
+      { "name": "isPublishResult", "parameterTypes": [] },
+      { "name": "setCheckDriftOnMigrate", "parameterTypes": ["boolean"] },
+      { "name": "setPublishResult", "parameterTypes": ["boolean"] }
+    ]
+  },
+  {
+    "name": "org.flywaydb.database.postgresql.PostgreSQLConfigurationExtension",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      { "name": "<init>", "parameterTypes": [] },
+      { "name": "getTransactional", "parameterTypes": [] },
+      { "name": "isTransactionalLock", "parameterTypes": [] },
+      { "name": "setTransactional", "parameterTypes": ["org.flywaydb.database.postgresql.TransactionalModel"] },
+      { "name": "setTransactionalLock", "parameterTypes": ["boolean"] }
+    ]
+  },
+  {
+    "name": "org.flywaydb.database.postgresql.TransactionalModel",
+    "condition": { "typeReachable": "org.flywaydb.core.extensibility.ConfigurationExtension" },
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      { "name": "<init>", "parameterTypes": [] },
+      { "name": "getLock", "parameterTypes": [] },
+      { "name": "setLock", "parameterTypes": ["java.lang.Boolean"] }
+    ]
+  }
+]
