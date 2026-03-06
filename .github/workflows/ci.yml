@@ -26,11 +26,9 @@ jobs:
 
       - name: Compile
         run: sbt compile
-        working-directory: flashcards
 
       - name: Test
         run: sbt test
-        working-directory: flashcards
 
   # ── Docker build & push to GHCR ──────────────────────────────────────────────
   docker:
@@ -63,7 +61,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: flashcards
+          context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
