@@ -78,3 +78,29 @@ jobs:
       - name: Trigger Render deploy hook
         run: |
           curl -fsSL -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+
+  # ── Wait for Render to be healthy ─────────────────────────────────────────────
+  health-check:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Wait for Render service to be healthy
+        env:
+          SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
+        run: |
+          echo "Waiting for $SERVICE_URL to respond with HTTP 200..."
+          MAX_RETRIES=30
+          SLEEP_SECONDS=20
+          for i in $(seq 1 $MAX_RETRIES); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$SERVICE_URL" || echo "000")
+            echo "Attempt $i/$MAX_RETRIES – HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Service is healthy!"
+              exit 0
+            fi
+            sleep $SLEEP_SECONDS
+          done
+          echo "Service did not become healthy after $((MAX_RETRIES * SLEEP_SECONDS))s"
+          exit 1
