@@ -3,7 +3,7 @@
 FROM gcr.io/distroless/base-debian12
 WORKDIR /app
 
-COPY target/native-image/flashcards flashcards
+COPY target/graalvm-native-image/flashcards flashcards
 
 EXPOSE 8080
 

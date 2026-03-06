@@ -1,6 +1,6 @@
 .dockerignore
 target/
-!target/native-image/flashcards
+!target/graalvm-native-image/flashcards
 .bsp/
 .metals/
 .idea/

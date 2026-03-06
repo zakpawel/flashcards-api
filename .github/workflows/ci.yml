@@ -48,7 +48,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: flashcards-native
-          path: target/native-image/flashcards
+          path: target/graalvm-native-image/flashcards
           retention-days: 1
 
   # ── Docker build & push to GHCR ──────────────────────────────────────────────
@@ -67,10 +67,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: flashcards-native
-          path: target/native-image/
+          path: target/graalvm-native-image/
 
       - name: Make binary executable
-        run: chmod +x target/native-image/flashcards
+        run: chmod +x target/graalvm-native-image/flashcards
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
