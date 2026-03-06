@@ -4,12 +4,15 @@
 services:
   - type: web
     name: flashcards-api
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    # Render pobierze obraz zbudowany przez GitHub Actions lub zbuduje lokalnie
+    runtime: image
+    image:
+      url: ghcr.io/zakpawel/flashcards-api:latest
+      creds:
+        fromRegistryCreds:
+          name: ghcr PAT credential
     plan: free                        # zmień na "starter" / "standard" dla produkcji
     region: frankfurt                 # eu-central
-    healthCheckPath: /                 # health check
+    healthCheckPath: /                # health check
     envVars:
       - key: PORT
         value: "8080"
