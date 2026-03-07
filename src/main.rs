@@ -1,7 +1,11 @@
+use async_graphql::{
+    http::GraphiQLSource, Context, InputObject, Object, Schema, SimpleObject,
+};
+use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -18,7 +22,7 @@ const GIT_SHA: &str = match option_env!("GIT_SHA") {
     None => "unknown",
 };
 
-// ── Model ─────────────────────────────────────────────────────────────────────
+// ── DB Model ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 struct Flashcard {
@@ -30,7 +34,219 @@ struct Flashcard {
     updated_at: DateTime<Utc>,
 }
 
-// ── Request / query types ─────────────────────────────────────────────────────
+// ── GraphQL types ─────────────────────────────────────────────────────────────
+
+/// A single flashcard.
+#[derive(SimpleObject)]
+struct GqlFlashcard {
+    id: Uuid,
+    front: String,
+    back: String,
+    category: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<Flashcard> for GqlFlashcard {
+    fn from(f: Flashcard) -> Self {
+        GqlFlashcard {
+            id: f.id,
+            front: f.front,
+            back: f.back,
+            category: f.category,
+            created_at: f.created_at,
+            updated_at: f.updated_at,
+        }
+    }
+}
+
+#[derive(InputObject)]
+struct CreateFlashcardInput {
+    front: String,
+    back: String,
+    category: Option<String>,
+}
+
+#[derive(InputObject)]
+struct UpdateFlashcardInput {
+    front: Option<String>,
+    back: Option<String>,
+    /// Provide a value to set a new category, or omit to keep the existing one.
+    category: Option<String>,
+    /// Set to `true` to explicitly clear the category (set it to null).
+    #[graphql(default)]
+    clear_category: bool,
+}
+
+// ── GraphQL schema ────────────────────────────────────────────────────────────
+
+pub struct QueryRoot;
+
+#[Object]
+impl QueryRoot {
+    /// Fetch all flashcards, optionally filtered by category.
+    async fn flashcards(
+        &self,
+        ctx: &Context<'_>,
+        category: Option<String>,
+    ) -> async_graphql::Result<Vec<GqlFlashcard>> {
+        let pool = ctx.data::<PgPool>()?;
+        let cards = match category.as_deref() {
+            Some(cat) if !cat.is_empty() => {
+                sqlx::query_as!(
+                    Flashcard,
+                    "SELECT id, front, back, category, created_at, updated_at
+                 FROM flashcards
+                 WHERE category = $1
+                 ORDER BY created_at DESC",
+                    cat
+                )
+                .fetch_all(pool)
+                .await?
+            }
+            _ => {
+                sqlx::query_as!(
+                    Flashcard,
+                    "SELECT id, front, back, category, created_at, updated_at
+                 FROM flashcards
+                 ORDER BY created_at DESC"
+                )
+                .fetch_all(pool)
+                .await?
+            }
+        };
+        Ok(cards.into_iter().map(GqlFlashcard::from).collect())
+    }
+
+    /// Fetch a single flashcard by its UUID.
+    async fn flashcard(
+        &self,
+        ctx: &Context<'_>,
+        id: Uuid,
+    ) -> async_graphql::Result<Option<GqlFlashcard>> {
+        let pool = ctx.data::<PgPool>()?;
+        let card = sqlx::query_as!(
+            Flashcard,
+            "SELECT id, front, back, category, created_at, updated_at
+         FROM flashcards WHERE id = $1",
+            id
+        )
+        .fetch_optional(pool)
+        .await?;
+        Ok(card.map(GqlFlashcard::from))
+    }
+}
+
+pub struct MutationRoot;
+
+#[Object]
+impl MutationRoot {
+    /// Create a new flashcard.
+    async fn create_flashcard(
+        &self,
+        ctx: &Context<'_>,
+        input: CreateFlashcardInput,
+    ) -> async_graphql::Result<GqlFlashcard> {
+        let pool = ctx.data::<PgPool>()?;
+        let card = sqlx::query_as!(
+            Flashcard,
+            "INSERT INTO flashcards (front, back, category)
+         VALUES ($1, $2, $3)
+         RETURNING id, front, back, category, created_at, updated_at",
+            input.front,
+            input.back,
+            input.category
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(GqlFlashcard::from(card))
+    }
+
+    /// Update an existing flashcard. Returns `null` if the ID is not found.
+    async fn update_flashcard(
+        &self,
+        ctx: &Context<'_>,
+        id: Uuid,
+        input: UpdateFlashcardInput,
+    ) -> async_graphql::Result<Option<GqlFlashcard>> {
+        let pool = ctx.data::<PgPool>()?;
+
+        let existing = sqlx::query_as!(
+            Flashcard,
+            "SELECT id, front, back, category, created_at, updated_at
+         FROM flashcards WHERE id = $1",
+            id
+        )
+        .fetch_optional(pool)
+        .await?;
+
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+
+        let new_front = input.front.unwrap_or(existing.front);
+        let new_back = input.back.unwrap_or(existing.back);
+        let new_category = if input.clear_category {
+            None
+        } else {
+            input.category.or(existing.category)
+        };
+
+        let updated = sqlx::query_as!(
+            Flashcard,
+            "UPDATE flashcards
+         SET front = $1, back = $2, category = $3, updated_at = now()
+         WHERE id = $4
+         RETURNING id, front, back, category, created_at, updated_at",
+            new_front,
+            new_back,
+            new_category,
+            id
+        )
+        .fetch_one(pool)
+        .await?;
+
+        Ok(Some(GqlFlashcard::from(updated)))
+    }
+
+    /// Delete a flashcard by ID. Returns `true` if it existed, `false` otherwise.
+    async fn delete_flashcard(
+        &self,
+        ctx: &Context<'_>,
+        id: Uuid,
+    ) -> async_graphql::Result<bool> {
+        let pool = ctx.data::<PgPool>()?;
+        let result = sqlx::query!("DELETE FROM flashcards WHERE id = $1", id)
+            .execute(pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+pub type AppSchema = Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription>;
+
+// ── Shared app state ──────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct AppState {
+    pool: PgPool,
+    schema: AppSchema,
+}
+
+// ── GraphQL handlers ──────────────────────────────────────────────────────────
+
+async fn graphql_handler(
+    State(state): State<AppState>,
+    req: GraphQLRequest,
+) -> GraphQLResponse {
+    state.schema.execute(req.into_inner()).await.into()
+}
+
+async fn graphiql_handler() -> impl IntoResponse {
+    Html(GraphiQLSource::build().endpoint("/graphql").finish())
+}
+
+// ── REST request / query types ────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct CategoryQuery {
@@ -96,7 +312,7 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
 
 type Result<T> = std::result::Result<T, AppError>;
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// ── REST handlers ─────────────────────────────────────────────────────────────
 
 async fn health() -> &'static str {
     "Flashcards API is running"
@@ -107,9 +323,10 @@ async fn version() -> Json<serde_json::Value> {
 }
 
 async fn list_flashcards(
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Query(params): Query<CategoryQuery>,
 ) -> Result<Json<Vec<Flashcard>>> {
+    let pool = &state.pool;
     let cards = match params.category.as_deref() {
         Some(cat) if !cat.is_empty() => {
             sqlx::query_as!(
@@ -120,7 +337,7 @@ async fn list_flashcards(
                  ORDER BY created_at DESC",
                 cat
             )
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await?
         }
         _ => {
@@ -130,7 +347,7 @@ async fn list_flashcards(
                  FROM flashcards
                  ORDER BY created_at DESC"
             )
-            .fetch_all(&pool)
+            .fetch_all(pool)
             .await?
         }
     };
@@ -138,16 +355,17 @@ async fn list_flashcards(
 }
 
 async fn get_flashcard(
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Response> {
+    let pool = &state.pool;
     let card = sqlx::query_as!(
         Flashcard,
         "SELECT id, front, back, category, created_at, updated_at
          FROM flashcards WHERE id = $1",
         id
     )
-    .fetch_optional(&pool)
+    .fetch_optional(pool)
     .await?;
 
     Ok(match card {
@@ -161,9 +379,10 @@ async fn get_flashcard(
 }
 
 async fn create_flashcard(
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Json(body): Json<CreateFlashcard>,
 ) -> Result<Response> {
+    let pool = &state.pool;
     let card = sqlx::query_as!(
         Flashcard,
         "INSERT INTO flashcards (front, back, category)
@@ -173,25 +392,25 @@ async fn create_flashcard(
         body.back,
         body.category
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await?;
 
     Ok((StatusCode::CREATED, Json(card)).into_response())
 }
 
 async fn update_flashcard(
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateFlashcard>,
 ) -> Result<Response> {
-    // Fetch existing record first
+    let pool = &state.pool;
     let existing = sqlx::query_as!(
         Flashcard,
         "SELECT id, front, back, category, created_at, updated_at
          FROM flashcards WHERE id = $1",
         id
     )
-    .fetch_optional(&pool)
+    .fetch_optional(pool)
     .await?;
 
     let Some(existing) = existing else {
@@ -220,18 +439,19 @@ async fn update_flashcard(
         new_category,
         id
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await?;
 
     Ok(Json(updated).into_response())
 }
 
 async fn delete_flashcard(
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Response> {
+    let pool = &state.pool;
     let result = sqlx::query!("DELETE FROM flashcards WHERE id = $1", id)
-        .execute(&pool)
+        .execute(pool)
         .await?;
 
     Ok(if result.rows_affected() > 0 {
@@ -273,17 +493,34 @@ async fn main() -> anyhow::Result<()> {
     // Run migrations
     sqlx::migrate!("./migrations").run(&pool).await?;
 
+    // Build GraphQL schema — PgPool is injected as context data
+    let schema = Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription)
+        .data(pool.clone())
+        .finish();
+
+    let state = AppState { pool, schema };
+
     let app = Router::new()
+        // ── Health / meta ──
         .route("/", get(health))
         .route("/version", get(version))
-        .route("/api/v1/flashcards", get(list_flashcards).post(create_flashcard))
+        // ── REST API ──
         .route(
-            "/api/v1/flashcards/:id",
+            "/api/v1/flashcards",
+            get(list_flashcards).post(create_flashcard),
+        )
+        .route(
+            "/api/v1/flashcards/{id}",
             get(get_flashcard)
                 .patch(update_flashcard)
                 .delete(delete_flashcard),
         )
-        .with_state(pool);
+        // ── GraphQL (POST = execute, GET = GraphiQL IDE) ──
+        .route(
+            "/graphql",
+            get(graphiql_handler).post(graphql_handler),
+        )
+        .with_state(state);
 
     let port = env::var("PORT").unwrap_or_else(|_| "8080".into());
     let addr = format!("0.0.0.0:{port}");
