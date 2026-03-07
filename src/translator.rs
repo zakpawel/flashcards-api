@@ -2,6 +2,7 @@ use async_graphql::{Context, InputObject, Object, SimpleObject};
 use bcrypt::{hash, verify, DEFAULT_COST};
 use rand::distributions::Alphanumeric;
 use rand::Rng;
+use serde::Deserialize;
 use sqlx::PgPool;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -45,6 +46,132 @@ struct TranslationRow {
     to: String,
     language: Option<String>,
     collection_id: String,
+}
+
+// ── Social-login helpers ──────────────────────────────────────────────────────
+
+/// Deserialized fields from Google's tokeninfo endpoint.
+#[derive(Deserialize)]
+struct GoogleTokenInfo {
+    sub: String,            // stable Google user ID
+    email: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+/// Verify a Google ID token via the tokeninfo endpoint.
+/// Returns `(google_uid, email)` on success.
+async fn verify_google_token(id_token: &str) -> async_graphql::Result<(String, Option<String>)> {
+    let url = format!(
+        "https://oauth2.googleapis.com/tokeninfo?id_token={}",
+        id_token
+    );
+    let resp = reqwest::get(&url)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("Google tokeninfo request failed: {e}")))?;
+
+    let info: GoogleTokenInfo = resp
+        .json()
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("Failed to parse Google tokeninfo: {e}")))?;
+
+    if let Some(desc) = info.error_description {
+        return Err(async_graphql::Error::new(format!("Invalid Google token: {desc}")));
+    }
+
+    Ok((info.sub, info.email))
+}
+
+/// Derive a username from an email address.
+/// e.g. "john.doe@gmail.com" → "john.doe", with a random 4-digit suffix if taken.
+fn username_from_email(email: &str) -> String {
+    let base = email.split('@').next().unwrap_or("user");
+    // Sanitise: keep only alphanumeric + underscore + dot
+    let clean: String = base
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '.' { c } else { '_' })
+        .collect();
+    if clean.is_empty() { "user".to_string() } else { clean }
+}
+
+/// Find-or-create a user for a social provider login.
+/// Returns `(user_id, username)`.
+async fn upsert_social_user(
+    pool: &PgPool,
+    provider: &str,
+    provider_uid: &str,
+    email: Option<&str>,
+) -> async_graphql::Result<(String, String)> {
+    // 1. Look up existing provider row.
+    let existing = sqlx::query!(
+        "SELECT u.id, u.username
+         FROM auth_providers ap
+         JOIN users u ON u.id = ap.user_id
+         WHERE ap.provider = $1 AND ap.provider_uid = $2",
+        provider,
+        provider_uid
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = existing {
+        return Ok((row.id, row.username));
+    }
+
+    // 2. No provider row — create a new user.
+    let user_id = new_id();
+    let base_username = email
+        .map(username_from_email)
+        .unwrap_or_else(|| format!("user_{}", new_id()));
+
+    // Append random suffix if the username is already taken.
+    let username = {
+        let taken: Option<String> = sqlx::query_scalar!(
+            "SELECT id FROM users WHERE username = $1",
+            base_username
+        )
+        .fetch_optional(pool)
+        .await?;
+
+        if taken.is_some() {
+            format!(
+                "{}_{}",
+                base_username,
+                rand::thread_rng()
+                    .sample_iter(&Alphanumeric)
+                    .take(4)
+                    .map(char::from)
+                    .collect::<String>()
+            )
+        } else {
+            base_username
+        }
+    };
+
+    sqlx::query!(
+        "INSERT INTO users (id, username, email, password_hash)
+         VALUES ($1, $2, $3, NULL)",
+        user_id,
+        username,
+        email
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+    sqlx::query!(
+        "INSERT INTO auth_providers (user_id, provider, provider_uid, email)
+         VALUES ($1, $2, $3, $4)",
+        user_id,
+        provider,
+        provider_uid,
+        email
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+    Ok((user_id, username))
 }
 
 // ── GraphQL output types ──────────────────────────────────────────────────────
@@ -760,5 +887,47 @@ impl TranslatorMutation {
                 },
             },
         })
+    }
+
+    /// Sign in with a Google ID token.
+    /// If no account exists for this Google identity, one is created automatically.
+    async fn log_in_with_google(
+        &self,
+        ctx: &Context<'_>,
+        id_token: String,
+    ) -> async_graphql::Result<LogInResult> {
+        let pool = ctx.data::<PgPool>()?;
+        let (google_uid, email) = verify_google_token(&id_token).await?;
+        let (user_id, username) =
+            upsert_social_user(pool, "google", &google_uid, email.as_deref()).await?;
+
+        let token = new_token();
+        sqlx::query!(
+            "INSERT INTO sessions (token, user_id) VALUES ($1, $2)",
+            token,
+            user_id
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(LogInResult {
+            viewer: GqlViewer {
+                session_token: token,
+                user: GqlUser { id: user_id, username },
+            },
+        })
+    }
+
+    /// Sign in with a Facebook access token.
+    /// **Not yet implemented** — returns an error so the schema is already in place
+    /// for when Facebook OAuth is added.
+    async fn log_in_with_facebook(
+        &self,
+        _ctx: &Context<'_>,
+        _access_token: String,
+    ) -> async_graphql::Result<LogInResult> {
+        Err(async_graphql::Error::new(
+            "Facebook login is not yet implemented",
+        ))
     }
 }

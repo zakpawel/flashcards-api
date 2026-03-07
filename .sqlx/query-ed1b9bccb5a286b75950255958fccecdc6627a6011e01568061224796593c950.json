@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id, u.username\n         FROM auth_providers ap\n         JOIN users u ON u.id = ap.user_id\n         WHERE ap.provider = $1 AND ap.provider_uid = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "username",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "ed1b9bccb5a286b75950255958fccecdc6627a6011e01568061224796593c950"
+}
