@@ -1,14 +1,17 @@
+mod translator;
+
 use async_graphql::{
-    http::GraphiQLSource, Context, InputObject, Object, Schema, SimpleObject,
+    http::GraphiQLSource, Context, InputObject, MergedObject, Object, Schema, SimpleObject,
 };
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
 };
+use translator::SessionToken;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -80,6 +83,7 @@ struct UpdateFlashcardInput {
 
 // ── GraphQL schema ────────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct QueryRoot;
 
 #[Object]
@@ -137,6 +141,7 @@ impl QueryRoot {
     }
 }
 
+#[derive(Default)]
 pub struct MutationRoot;
 
 #[Object]
@@ -223,7 +228,13 @@ impl MutationRoot {
     }
 }
 
-pub type AppSchema = Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription>;
+#[derive(MergedObject, Default)]
+pub struct CombinedQuery(QueryRoot, translator::TranslatorQuery);
+
+#[derive(MergedObject, Default)]
+pub struct CombinedMutation(MutationRoot, translator::TranslatorMutation);
+
+pub type AppSchema = Schema<CombinedQuery, CombinedMutation, async_graphql::EmptySubscription>;
 
 // ── Shared app state ──────────────────────────────────────────────────────────
 
@@ -237,9 +248,17 @@ struct AppState {
 
 async fn graphql_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
-    state.schema.execute(req.into_inner()).await.into()
+    let mut request = req.into_inner();
+    if let Some(token) = headers
+        .get("x-parse-session-token")
+        .and_then(|v| v.to_str().ok())
+    {
+        request = request.data(SessionToken(token.to_string()));
+    }
+    state.schema.execute(request).await.into()
 }
 
 async fn graphiql_handler() -> impl IntoResponse {
@@ -494,9 +513,13 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
 
     // Build GraphQL schema — PgPool is injected as context data
-    let schema = Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription)
-        .data(pool.clone())
-        .finish();
+    let schema = Schema::build(
+        CombinedQuery::default(),
+        CombinedMutation::default(),
+        async_graphql::EmptySubscription,
+    )
+    .data(pool.clone())
+    .finish();
 
     let state = AppState { pool, schema };
 

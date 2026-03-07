@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE translations\n             SET \"from\" = $1, \"to\" = $2, collection_id = $3, updated_at = now()\n             WHERE id = $4\n             RETURNING id, \"from\", \"to\", language, collection_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "from",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "to",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "language",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "collection_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "0349244edbbe990c4e58562cf8825763e610469b31fc6c7b825085326e3ef195"
+}

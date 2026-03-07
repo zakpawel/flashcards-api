@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM translations WHERE id = $1\n             RETURNING id, \"from\", \"to\", language, collection_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "from",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "to",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "language",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "collection_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "bec75ae12a011a7cb512d15d676b6764e7fde0e300b38fe8b1eb5552a16eee96"
+}
