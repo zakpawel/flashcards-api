@@ -1,3 +1,4 @@
+mod mail;
 mod translator;
 
 use async_graphql::{
@@ -519,6 +520,7 @@ async fn main() -> anyhow::Result<()> {
         async_graphql::EmptySubscription,
     )
     .data(pool.clone())
+    .data(mail::Mailer::from_env())
     .finish();
 
     let state = AppState { pool, schema };

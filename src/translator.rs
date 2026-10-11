@@ -3,6 +3,7 @@ use bcrypt::{hash, verify, DEFAULT_COST};
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use serde::Deserialize;
+use crate::mail::Mailer;
 use sqlx::PgPool;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -21,6 +22,22 @@ fn new_token() -> String {
         .take(40)
         .map(char::from)
         .collect()
+}
+
+// ── Password reset helpers ────────────────────────────────────────────────────
+
+const RESET_CODE_TTL_MINUTES: i32 = 15;
+const RESET_MAX_ATTEMPTS: i32 = 5;
+const RESET_RESEND_COOLDOWN_SECONDS: i32 = 60;
+const MIN_PASSWORD_LEN: usize = 8;
+
+/// A random 6-digit code, zero-padded ("004217").
+fn new_reset_code() -> String {
+    format!("{:06}", rand::thread_rng().gen_range(0..1_000_000))
+}
+
+fn normalize_email(email: &str) -> String {
+    email.trim().to_lowercase()
 }
 
 // ── DB row types ──────────────────────────────────────────────────────────────
@@ -627,6 +644,132 @@ impl TranslatorMutation {
         })
     }
 
+    /// Ask for a password reset code to be emailed.
+    ///
+    /// Always returns `true`, whether or not the address has an account, so the response
+    /// cannot be used to find out who is registered. Requests for the same account within
+    /// a minute of each other are ignored.
+    async fn request_password_reset(
+        &self,
+        ctx: &Context<'_>,
+        email: String,
+    ) -> async_graphql::Result<bool> {
+        let pool = ctx.data::<PgPool>()?;
+        let mailer = ctx.data::<Mailer>()?.clone();
+        let email = normalize_email(&email);
+
+        // Hash before looking the user up so known and unknown addresses take similar time.
+        let code = new_reset_code();
+        let code_hash = hash(&code, DEFAULT_COST)
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        let user: Option<(String, String, String)> =
+            sqlx::query_as("SELECT id, username, email FROM users WHERE lower(email) = $1")
+                .bind(&email)
+                .fetch_optional(pool)
+                .await?;
+        let Some((user_id, username, address)) = user else {
+            return Ok(true);
+        };
+
+        let stored = sqlx::query(
+            "INSERT INTO password_resets (user_id, code_hash, expires_at)
+             VALUES ($1, $2, now() + ($3 * interval '1 minute'))
+             ON CONFLICT (user_id) DO UPDATE
+                SET code_hash = EXCLUDED.code_hash,
+                    attempts = 0,
+                    created_at = now(),
+                    expires_at = EXCLUDED.expires_at
+                WHERE password_resets.created_at < now() - ($4 * interval '1 second')",
+        )
+        .bind(&user_id)
+        .bind(&code_hash)
+        .bind(RESET_CODE_TTL_MINUTES)
+        .bind(RESET_RESEND_COOLDOWN_SECONDS)
+        .execute(pool)
+        .await?
+        .rows_affected();
+
+        if stored > 0 {
+            // Send in the background so the response time does not reveal the account exists.
+            tokio::spawn(async move {
+                mailer.send_reset_code(&address, &username, &code).await;
+            });
+        }
+        Ok(true)
+    }
+
+    /// Set a new password using the code from the reset email.
+    /// All existing sessions for the account are ended.
+    async fn reset_password(
+        &self,
+        ctx: &Context<'_>,
+        email: String,
+        code: String,
+        new_password: String,
+    ) -> async_graphql::Result<bool> {
+        let pool = ctx.data::<PgPool>()?;
+        let invalid = || async_graphql::Error::new("Invalid or expired code");
+
+        if new_password.chars().count() < MIN_PASSWORD_LEN {
+            return Err(async_graphql::Error::new(format!(
+                "Password must be at least {MIN_PASSWORD_LEN} characters"
+            )));
+        }
+
+        let email = normalize_email(&email);
+        let user_id: Option<String> =
+            sqlx::query_scalar("SELECT id FROM users WHERE lower(email) = $1")
+                .bind(&email)
+                .fetch_optional(pool)
+                .await?;
+        let Some(user_id) = user_id else {
+            // Spend similar time as a real attempt.
+            let _ = hash(&code, DEFAULT_COST);
+            return Err(invalid());
+        };
+
+        // Count the attempt before checking the code, in one statement, so parallel guesses
+        // cannot get past the limit.
+        let code_hash: Option<String> = sqlx::query_scalar(
+            "UPDATE password_resets SET attempts = attempts + 1
+             WHERE user_id = $1 AND expires_at > now() AND attempts < $2
+             RETURNING code_hash",
+        )
+        .bind(&user_id)
+        .bind(RESET_MAX_ATTEMPTS)
+        .fetch_optional(pool)
+        .await?;
+        let Some(code_hash) = code_hash else {
+            return Err(invalid());
+        };
+
+        let matches = verify(code.trim(), &code_hash)
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        if !matches {
+            return Err(invalid());
+        }
+
+        let new_hash = hash(&new_password, DEFAULT_COST)
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+            .bind(&user_id)
+            .bind(&new_hash)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM password_resets WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Create a new collection.
     async fn create_collection(
         &self,
@@ -929,5 +1072,287 @@ impl TranslatorMutation {
         Err(async_graphql::Error::new(
             "Facebook login is not yet implemented",
         ))
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_graphql::{EmptySubscription, Request, Schema, Variables};
+    use serde_json::json;
+
+    type TestSchema = Schema<TranslatorQuery, TranslatorMutation, EmptySubscription>;
+
+    const OLD_PASSWORD: &str = "oldpassword";
+    const NEW_PASSWORD: &str = "brand-new-pass";
+    const CODE: &str = "123456";
+
+    fn schema(pool: &PgPool) -> TestSchema {
+        Schema::build(TranslatorQuery::default(), TranslatorMutation::default(), EmptySubscription)
+            .data(pool.clone())
+            .data(Mailer::from_env())
+            .finish()
+    }
+
+    async fn run(
+        schema: &TestSchema,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> async_graphql::Response {
+        schema
+            .execute(Request::new(query).variables(Variables::from_json(variables)))
+            .await
+    }
+
+    async fn add_user(pool: &PgPool, id: &str, username: &str, email: &str) {
+        let password_hash = hash(OLD_PASSWORD, 4).unwrap();
+        sqlx::query("INSERT INTO users (id, username, email, password_hash) VALUES ($1, $2, $3, $4)")
+            .bind(id)
+            .bind(username)
+            .bind(email)
+            .bind(password_hash)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Stores a reset code we know, as if `requestPasswordReset` had been called.
+    async fn add_reset(pool: &PgPool, user_id: &str, minutes_until_expiry: i32) {
+        sqlx::query(
+            "INSERT INTO password_resets (user_id, code_hash, expires_at)
+             VALUES ($1, $2, now() + ($3 * interval '1 minute'))",
+        )
+        .bind(user_id)
+        .bind(hash(CODE, 4).unwrap())
+        .bind(minutes_until_expiry)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    const RESET: &str = "mutation($e: String!, $c: String!, $p: String!) {
+        resetPassword(email: $e, code: $c, newPassword: $p) }";
+    const REQUEST: &str = "mutation($e: String!) { requestPasswordReset(email: $e) }";
+    const LOGIN: &str = "mutation($u: String!, $p: String!) {
+        logIn(username: $u, password: $p) { viewer { sessionToken } } }";
+
+    async fn reset(schema: &TestSchema, email: &str, code: &str, password: &str) -> async_graphql::Response {
+        run(schema, RESET, json!({ "e": email, "c": code, "p": password })).await
+    }
+
+    async fn can_log_in(schema: &TestSchema, username: &str, password: &str) -> bool {
+        run(schema, LOGIN, json!({ "u": username, "p": password })).await.errors.is_empty()
+    }
+
+    async fn reset_rows(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM password_resets")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    fn error_message(resp: &async_graphql::Response) -> String {
+        resp.errors.first().map(|e| e.message.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn reset_codes_are_six_digits() {
+        for _ in 0..200 {
+            let code = new_reset_code();
+            assert_eq!(code.len(), 6, "{code}");
+            assert!(code.chars().all(|c| c.is_ascii_digit()), "{code}");
+        }
+    }
+
+    #[test]
+    fn emails_are_trimmed_and_lowercased() {
+        assert_eq!(normalize_email("  Pawel@Example.COM "), "pawel@example.com");
+    }
+
+    #[sqlx::test]
+    async fn request_for_unknown_email_succeeds_but_stores_nothing(pool: PgPool) {
+        let schema = schema(&pool);
+
+        let resp = run(&schema, REQUEST, json!({ "e": "nobody@example.com" })).await;
+
+        assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+        assert_eq!(resp.data.into_json().unwrap()["requestPasswordReset"], true);
+        assert_eq!(reset_rows(&pool).await, 0);
+    }
+
+    #[sqlx::test]
+    async fn request_for_known_email_stores_a_code_regardless_of_case(pool: PgPool) {
+        add_user(&pool, "u1", "pawel", "Pawel@Example.com").await;
+        let schema = schema(&pool);
+
+        let resp = run(&schema, REQUEST, json!({ "e": " PAWEL@example.com " })).await;
+
+        assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+        assert_eq!(reset_rows(&pool).await, 1);
+    }
+
+    #[sqlx::test]
+    async fn repeated_requests_within_a_minute_keep_the_first_code(pool: PgPool) {
+        add_user(&pool, "u1", "pawel", "pawel@example.com").await;
+        let schema = schema(&pool);
+        run(&schema, REQUEST, json!({ "e": "pawel@example.com" })).await;
+        let first: String = sqlx::query_scalar("SELECT code_hash FROM password_resets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        run(&schema, REQUEST, json!({ "e": "pawel@example.com" })).await;
+
+        let second: String = sqlx::query_scalar("SELECT code_hash FROM password_resets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[sqlx::test]
+    async fn an_old_request_is_replaced_by_a_new_one(pool: PgPool) {
+        add_user(&pool, "u1", "pawel", "pawel@example.com").await;
+        add_reset(&pool, "u1", 10).await;
+        sqlx::query("UPDATE password_resets SET created_at = now() - interval '5 minutes', attempts = 3")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old: String = sqlx::query_scalar("SELECT code_hash FROM password_resets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        run(&schema(&pool), REQUEST, json!({ "e": "pawel@example.com" })).await;
+
+        let (new, attempts): (String, i32) =
+            sqlx::query_as("SELECT code_hash, attempts FROM password_resets")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_ne!(old, new);
+        assert_eq!(attempts, 0);
+    }
+
+    #[sqlx::test]
+    async fn correct_code_changes_the_password(pool: PgPool) {
+        add_user(&pool, "u1", "pawel", "pawel@example.com").await;
+        add_reset(&pool, "u1", 10).await;
+        let schema = schema(&pool);
+
+        let resp = reset(&schema, "pawel@example.com", CODE, NEW_PASSWORD).await;
+
+        assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+        assert!(can_log_in(&schema, "pawel", NEW_PASSWORD).await);
+        assert!(!can_log_in(&schema, "pawel", OLD_PASSWORD).await);
+        assert_eq!(reset_rows(&pool).await, 0, "the code must be single-use");
+    }
+
+    #[sqlx::test]
+    async fn the_code_works_only_once(pool: PgPool) {
+        add_user(&pool, "u1", "pawel", "pawel@example.com").await;
+        add_reset(&pool, "u1", 10).await;
+        let schema = schema(&pool);
+        reset(&schema, "pawel@example.com", CODE, NEW_PASSWORD).await;
+
+        let again = reset(&schema, "pawel@example.com", CODE, "another-password").await;
+
+        assert_eq!(error_message(&again), "Invalid or expired code");
+        assert!(can_log_in(&schema, "pawel", NEW_PASSWORD).await);
+    }
+
+    #[sqlx::test]
+    async fn resetting_logs_out_existing_sessions(pool: PgPool) {
+        add_user(&pool, "u1", "pawel", "pawel@example.com").await;
+        sqlx::query("INSERT INTO sessions (token, user_id) VALUES ('old-session', 'u1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        add_reset(&pool, "u1", 10).await;
+
+        reset(&schema(&pool), "pawel@example.com", CODE, NEW_PASSWORD).await;
+
+        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE user_id = 'u1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 0);
+    }
+
+    #[sqlx::test]
+    async fn wrong_code_is_rejected_and_the_password_is_unchanged(pool: PgPool) {
+        add_user(&pool, "u1", "pawel", "pawel@example.com").await;
+        add_reset(&pool, "u1", 10).await;
+        let schema = schema(&pool);
+
+        let resp = reset(&schema, "pawel@example.com", "000000", NEW_PASSWORD).await;
+
+        assert_eq!(error_message(&resp), "Invalid or expired code");
+        assert!(can_log_in(&schema, "pawel", OLD_PASSWORD).await);
+        assert!(!can_log_in(&schema, "pawel", NEW_PASSWORD).await);
+    }
+
+    #[sqlx::test]
+    async fn five_wrong_guesses_lock_the_code_even_for_the_right_one(pool: PgPool) {
+        add_user(&pool, "u1", "pawel", "pawel@example.com").await;
+        add_reset(&pool, "u1", 10).await;
+        let schema = schema(&pool);
+
+        for _ in 0..RESET_MAX_ATTEMPTS {
+            let resp = reset(&schema, "pawel@example.com", "000000", NEW_PASSWORD).await;
+            assert_eq!(error_message(&resp), "Invalid or expired code");
+        }
+        let resp = reset(&schema, "pawel@example.com", CODE, NEW_PASSWORD).await;
+
+        assert_eq!(error_message(&resp), "Invalid or expired code");
+        assert!(can_log_in(&schema, "pawel", OLD_PASSWORD).await);
+    }
+
+    #[sqlx::test]
+    async fn expired_code_is_rejected(pool: PgPool) {
+        add_user(&pool, "u1", "pawel", "pawel@example.com").await;
+        add_reset(&pool, "u1", -1).await;
+
+        let resp = reset(&schema(&pool), "pawel@example.com", CODE, NEW_PASSWORD).await;
+
+        assert_eq!(error_message(&resp), "Invalid or expired code");
+    }
+
+    #[sqlx::test]
+    async fn unknown_email_gets_the_same_error_as_a_wrong_code(pool: PgPool) {
+        let resp = reset(&schema(&pool), "nobody@example.com", CODE, NEW_PASSWORD).await;
+
+        assert_eq!(error_message(&resp), "Invalid or expired code");
+    }
+
+    #[sqlx::test]
+    async fn short_password_is_rejected_without_using_up_the_code(pool: PgPool) {
+        add_user(&pool, "u1", "pawel", "pawel@example.com").await;
+        add_reset(&pool, "u1", 10).await;
+        let schema = schema(&pool);
+
+        let short = reset(&schema, "pawel@example.com", CODE, "short").await;
+        let ok = reset(&schema, "pawel@example.com", CODE, NEW_PASSWORD).await;
+
+        assert!(error_message(&short).contains("at least 8"));
+        assert!(ok.errors.is_empty(), "{:?}", ok.errors);
+    }
+
+    #[sqlx::test]
+    async fn accounts_without_a_password_can_set_one(pool: PgPool) {
+        // Google-only accounts have no password hash.
+        sqlx::query("INSERT INTO users (id, username, email, password_hash) VALUES ('g1', 'gus', 'gus@example.com', NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        add_reset(&pool, "g1", 10).await;
+        let schema = schema(&pool);
+
+        let resp = reset(&schema, "gus@example.com", CODE, NEW_PASSWORD).await;
+
+        assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+        assert!(can_log_in(&schema, "gus", NEW_PASSWORD).await);
     }
 }
