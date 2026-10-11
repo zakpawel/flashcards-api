@@ -72,12 +72,16 @@ struct TranslationRow {
 struct GoogleTokenInfo {
     sub: String,            // stable Google user ID
     email: Option<String>,
+    /// Google sends this as the string "true" / "false" (older responses used a bool).
+    #[serde(default)]
+    email_verified: serde_json::Value,
     #[serde(default)]
     error_description: Option<String>,
 }
 
 /// Verify a Google ID token via the tokeninfo endpoint.
-/// Returns `(google_uid, email)` on success.
+/// Returns `(google_uid, email)` on success. The email is only returned when Google
+/// has verified that the user owns it, so it is safe to use for account linking.
 async fn verify_google_token(id_token: &str) -> async_graphql::Result<(String, Option<String>)> {
     let url = format!(
         "https://oauth2.googleapis.com/tokeninfo?id_token={}",
@@ -96,7 +100,12 @@ async fn verify_google_token(id_token: &str) -> async_graphql::Result<(String, O
         return Err(async_graphql::Error::new(format!("Invalid Google token: {desc}")));
     }
 
-    Ok((info.sub, info.email))
+    let verified = match &info.email_verified {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::String(v) => v == "true",
+        _ => false,
+    };
+    Ok((info.sub, info.email.filter(|_| verified)))
 }
 
 /// Derive a username from an email address.
@@ -113,6 +122,12 @@ fn username_from_email(email: &str) -> String {
 
 /// Find-or-create a user for a social provider login.
 /// Returns `(user_id, username)`.
+///
+/// `email` must only be passed when the provider has verified it. A verified email that
+/// matches an existing account links the provider to that account instead of creating a
+/// duplicate. Sign-up doesn't verify emails, so someone could have registered an address
+/// they don't own; when linking we therefore remove the account's password and sessions.
+/// The verified owner can set a new password through the reset flow.
 async fn upsert_social_user(
     pool: &PgPool,
     provider: &str,
@@ -135,11 +150,56 @@ async fn upsert_social_user(
         return Ok((row.id, row.username));
     }
 
-    // 2. No provider row — create a new user.
+    // 2. A verified email that belongs to an existing account links to it.
+    if let Some(email) = email {
+        let matches: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, username FROM users WHERE lower(email) = lower($1) LIMIT 2",
+        )
+        .bind(email)
+        .fetch_all(pool)
+        .await?;
+
+        match matches.len() {
+            0 => {}
+            1 => {
+                let (user_id, username) = matches.into_iter().next().unwrap();
+                let mut tx = pool.begin().await?;
+                sqlx::query(
+                    "INSERT INTO auth_providers (user_id, provider, provider_uid, email)
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(&user_id)
+                .bind(provider)
+                .bind(provider_uid)
+                .bind(email)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query("UPDATE users SET password_hash = NULL WHERE id = $1")
+                    .bind(&user_id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+                    .bind(&user_id)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                return Ok((user_id, username));
+            }
+            _ => {
+                return Err(async_graphql::Error::new(
+                    "Several accounts use this email address, so it can't be linked automatically",
+                ));
+            }
+        }
+    }
+
+    // 3. No provider row and no matching account — create a new user.
+    // `users.email` is required, so without a verified email we can't create one.
+    let email = email.ok_or_else(|| {
+        async_graphql::Error::new("Your Google account has no verified email address")
+    })?;
     let user_id = new_id();
-    let base_username = email
-        .map(username_from_email)
-        .unwrap_or_else(|| format!("user_{}", new_id()));
+    let base_username = username_from_email(email);
 
     // Append random suffix if the username is already taken.
     let username = {
@@ -613,16 +673,21 @@ impl TranslatorMutation {
     ) -> async_graphql::Result<LogInResult> {
         let pool = ctx.data::<PgPool>()?;
 
-        let row = sqlx::query!(
+        let row: Option<(String, String, Option<String>)> = sqlx::query_as(
             "SELECT id, username, password_hash FROM users WHERE username = $1",
-            username
         )
+        .bind(&username)
         .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| async_graphql::Error::new("Invalid username or password"))?;
+        .await?;
+        let (id, db_username, password_hash) =
+            row.ok_or_else(|| async_graphql::Error::new("Invalid username or password"))?;
 
-        let valid = verify(&password, &row.password_hash)
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        // Accounts created through Google have no password.
+        let valid = match password_hash {
+            Some(hash) => verify(&password, &hash)
+                .map_err(|e| async_graphql::Error::new(e.to_string()))?,
+            None => false,
+        };
         if !valid {
             return Err(async_graphql::Error::new("Invalid username or password"));
         }
@@ -631,7 +696,7 @@ impl TranslatorMutation {
         sqlx::query!(
             "INSERT INTO sessions (token, user_id) VALUES ($1, $2)",
             token,
-            row.id
+            id
         )
         .execute(pool)
         .await?;
@@ -639,7 +704,7 @@ impl TranslatorMutation {
         Ok(LogInResult {
             viewer: GqlViewer {
                 session_token: token,
-                user: GqlUser { id: row.id, username: row.username },
+                user: GqlUser { id, username: db_username },
             },
         })
     }
@@ -1354,5 +1419,109 @@ mod tests {
 
         assert!(resp.errors.is_empty(), "{:?}", resp.errors);
         assert!(can_log_in(&schema, "gus", NEW_PASSWORD).await);
+    }
+
+    // ── Google account linking ────────────────────────────────────────────────
+
+    async fn insert_user(pool: &PgPool, id: &str, username: &str, email: &str, hash: Option<&str>) {
+        sqlx::query("INSERT INTO users (id, username, email, password_hash) VALUES ($1, $2, $3, $4)")
+            .bind(id)
+            .bind(username)
+            .bind(email)
+            .bind(hash)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn count(pool: &PgPool, sql: &str) -> i64 {
+        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+    }
+
+    #[sqlx::test]
+    async fn google_login_links_to_the_existing_account_with_that_email(pool: PgPool) {
+        insert_user(&pool, "u1", "pawel", "Pawel@Example.com", Some("x")).await;
+
+        let (id, username) = upsert_social_user(&pool, "google", "g-1", Some("pawel@example.com"))
+            .await
+            .unwrap();
+
+        assert_eq!((id.as_str(), username.as_str()), ("u1", "pawel"));
+        assert_eq!(count(&pool, "SELECT count(*) FROM users").await, 1);
+        assert_eq!(count(&pool, "SELECT count(*) FROM auth_providers WHERE user_id = 'u1'").await, 1);
+    }
+
+    #[sqlx::test]
+    async fn linking_removes_the_old_password_and_sessions(pool: PgPool) {
+        let hash = hash(OLD_PASSWORD, 4).unwrap();
+        insert_user(&pool, "u1", "pawel", "pawel@example.com", Some(&hash)).await;
+        sqlx::query("INSERT INTO sessions (token, user_id) VALUES ('old', 'u1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        upsert_social_user(&pool, "google", "g-1", Some("pawel@example.com")).await.unwrap();
+
+        assert_eq!(count(&pool, "SELECT count(*) FROM sessions").await, 0);
+        let schema = schema(&pool);
+        assert!(!can_log_in(&schema, "pawel", OLD_PASSWORD).await);
+    }
+
+    #[sqlx::test]
+    async fn second_google_login_reuses_the_link_and_keeps_sessions(pool: PgPool) {
+        insert_user(&pool, "u1", "pawel", "pawel@example.com", None).await;
+        upsert_social_user(&pool, "google", "g-1", Some("pawel@example.com")).await.unwrap();
+        sqlx::query("INSERT INTO sessions (token, user_id) VALUES ('s', 'u1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (id, _) = upsert_social_user(&pool, "google", "g-1", Some("pawel@example.com"))
+            .await
+            .unwrap();
+
+        assert_eq!(id, "u1");
+        assert_eq!(count(&pool, "SELECT count(*) FROM sessions").await, 1);
+        assert_eq!(count(&pool, "SELECT count(*) FROM auth_providers").await, 1);
+    }
+
+    #[sqlx::test]
+    async fn unknown_google_email_creates_a_new_account(pool: PgPool) {
+        let (id, username) = upsert_social_user(&pool, "google", "g-1", Some("new.person@example.com"))
+            .await
+            .unwrap();
+
+        assert_eq!(username, "new.person");
+        assert_eq!(count(&pool, &format!("SELECT count(*) FROM users WHERE id = '{id}'")).await, 1);
+    }
+
+    #[sqlx::test]
+    async fn unverified_google_email_never_touches_an_existing_account(pool: PgPool) {
+        // verify_google_token drops unverified emails, so the email arrives as None.
+        insert_user(&pool, "u1", "pawel", "pawel@example.com", Some("x")).await;
+
+        let result = upsert_social_user(&pool, "google", "g-1", None).await;
+
+        assert!(result.is_err());
+        assert_eq!(count(&pool, "SELECT count(*) FROM users WHERE id = 'u1' AND password_hash = 'x'").await, 1);
+    }
+
+    #[sqlx::test]
+    async fn ambiguous_email_is_refused_instead_of_guessing(pool: PgPool) {
+        insert_user(&pool, "u1", "a", "Same@example.com", Some("x")).await;
+        insert_user(&pool, "u2", "b", "same@example.com", Some("x")).await;
+
+        let result = upsert_social_user(&pool, "google", "g-1", Some("same@example.com")).await;
+
+        assert!(result.is_err());
+        assert_eq!(count(&pool, "SELECT count(*) FROM auth_providers").await, 0);
+    }
+
+    #[sqlx::test]
+    async fn password_login_on_a_google_only_account_fails_cleanly(pool: PgPool) {
+        insert_user(&pool, "u1", "gus", "gus@example.com", None).await;
+        let schema = schema(&pool);
+
+        assert!(!can_log_in(&schema, "gus", "anything").await);
     }
 }
