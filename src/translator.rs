@@ -842,7 +842,8 @@ impl TranslatorMutation {
         input: CreateCollectionInput,
     ) -> async_graphql::Result<CreateCollectionResult> {
         let pool = ctx.data::<PgPool>()?;
-        let f = input.fields;
+        let mut f = input.fields;
+        f.name = clean_collection_name(&f.name)?;
         let id = new_id();
 
         sqlx::query!(
@@ -855,7 +856,7 @@ impl TranslatorMutation {
         )
         .execute(pool)
         .await
-        .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        .map_err(|e| collection_write_error(e, &f.name))?;
 
         let user = sqlx::query_as!(
             UserRow,
@@ -882,18 +883,20 @@ impl TranslatorMutation {
         input: UpdateCollectionInput,
     ) -> async_graphql::Result<UpdateCollectionResult> {
         let pool = ctx.data::<PgPool>()?;
+        let name = clean_collection_name(&input.fields.name)?;
 
         let row = sqlx::query_as!(
             CollectionRow,
             "UPDATE collections SET name = $1, language = $2, updated_at = now()
              WHERE id = $3
              RETURNING id, name, language, user_id",
-            input.fields.name,
+            name,
             input.fields.language,
             input.id
         )
         .fetch_optional(pool)
-        .await?
+        .await
+        .map_err(|e| collection_write_error(e, &name))?
         .ok_or_else(|| async_graphql::Error::new("Collection not found"))?;
 
         let user = sqlx::query_as!(
@@ -1141,6 +1144,30 @@ impl TranslatorMutation {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+/// Name of the unique index in migration 0006.
+const COLLECTION_NAME_INDEX: &str = "collections_user_name_unique";
+
+/// Trims a collection name and refuses an empty one.
+fn clean_collection_name(name: &str) -> async_graphql::Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(async_graphql::Error::new("Collection name can't be empty."));
+    }
+    Ok(name.to_string())
+}
+
+/// Turns the "name already used" database error into a message the app can show as is.
+fn collection_write_error(e: sqlx::Error, name: &str) -> async_graphql::Error {
+    if let Some(db) = e.as_database_error() {
+        if db.is_unique_violation() && db.constraint() == Some(COLLECTION_NAME_INDEX) {
+            return async_graphql::Error::new(format!(
+                "You already have a collection named \"{name}\"."
+            ));
+        }
+    }
+    async_graphql::Error::new(e.to_string())
+}
 
 #[cfg(test)]
 mod tests {
@@ -1523,5 +1550,143 @@ mod tests {
         let schema = schema(&pool);
 
         assert!(!can_log_in(&schema, "gus", "anything").await);
+    }
+
+    const CREATE_COLLECTION: &str = "mutation($n: String!, $u: String!) {
+        createCollection(input: { fields: { name: $n, language: \"pl|en\", user: { link: $u } } }) {
+            collection { id name } } }";
+    const UPDATE_COLLECTION: &str = "mutation($id: String!, $n: String!) {
+        updateCollection(input: { id: $id, fields: { name: $n, language: \"pl|en\" } }) {
+            collection { id name } } }";
+
+    async fn create_collection(schema: &TestSchema, user: &str, name: &str) -> async_graphql::Response {
+        run(schema, CREATE_COLLECTION, json!({ "n": name, "u": user })).await
+    }
+
+    fn collection_id(resp: &async_graphql::Response) -> String {
+        resp.data.clone().into_json().unwrap()["createCollection"]["collection"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[sqlx::test]
+    async fn a_second_collection_with_the_same_name_is_refused(pool: PgPool) {
+        add_user(&pool, "u1", "ann", "ann@example.com").await;
+        let schema = schema(&pool);
+
+        assert!(create_collection(&schema, "u1", "Food").await.errors.is_empty());
+        let again = create_collection(&schema, "u1", "Food").await;
+
+        assert_eq!(error_message(&again), "You already have a collection named \"Food\".");
+        assert_eq!(count(&pool, "SELECT count(*) FROM collections").await, 1);
+    }
+
+    #[sqlx::test]
+    async fn names_differing_only_by_case_or_spaces_count_as_the_same(pool: PgPool) {
+        add_user(&pool, "u1", "ann", "ann@example.com").await;
+        let schema = schema(&pool);
+
+        assert!(create_collection(&schema, "u1", "Food").await.errors.is_empty());
+
+        assert!(!create_collection(&schema, "u1", "food").await.errors.is_empty());
+        assert!(!create_collection(&schema, "u1", "  FOOD ").await.errors.is_empty());
+        assert_eq!(count(&pool, "SELECT count(*) FROM collections").await, 1);
+    }
+
+    #[sqlx::test]
+    async fn different_users_may_use_the_same_name(pool: PgPool) {
+        add_user(&pool, "u1", "ann", "ann@example.com").await;
+        add_user(&pool, "u2", "bob", "bob@example.com").await;
+        let schema = schema(&pool);
+
+        assert!(create_collection(&schema, "u1", "Food").await.errors.is_empty());
+        assert!(create_collection(&schema, "u2", "Food").await.errors.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn the_name_is_stored_trimmed_and_blank_is_refused(pool: PgPool) {
+        add_user(&pool, "u1", "ann", "ann@example.com").await;
+        let schema = schema(&pool);
+
+        assert!(create_collection(&schema, "u1", "  Food  ").await.errors.is_empty());
+        let stored: String = sqlx::query_scalar("SELECT name FROM collections")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "Food");
+
+        let blank = create_collection(&schema, "u1", "   ").await;
+        assert_eq!(error_message(&blank), "Collection name can't be empty.");
+    }
+
+    #[sqlx::test]
+    async fn renaming_onto_another_collections_name_is_refused(pool: PgPool) {
+        add_user(&pool, "u1", "ann", "ann@example.com").await;
+        let schema = schema(&pool);
+        create_collection(&schema, "u1", "Food").await;
+        let travel = collection_id(&create_collection(&schema, "u1", "Travel").await);
+
+        let clash = run(&schema, UPDATE_COLLECTION, json!({ "id": travel, "n": "food" })).await;
+
+        assert_eq!(error_message(&clash), "You already have a collection named \"food\".");
+    }
+
+    #[sqlx::test]
+    async fn a_collection_can_keep_its_own_name_when_edited(pool: PgPool) {
+        add_user(&pool, "u1", "ann", "ann@example.com").await;
+        let schema = schema(&pool);
+        let food = collection_id(&create_collection(&schema, "u1", "Food").await);
+
+        let same = run(&schema, UPDATE_COLLECTION, json!({ "id": food, "n": "Food" })).await;
+        let recase = run(&schema, UPDATE_COLLECTION, json!({ "id": food, "n": "FOOD" })).await;
+
+        assert!(same.errors.is_empty(), "{:?}", same.errors);
+        assert!(recase.errors.is_empty(), "{:?}", recase.errors);
+    }
+
+    #[sqlx::test]
+    async fn the_name_can_be_reused_after_deleting(pool: PgPool) {
+        add_user(&pool, "u1", "ann", "ann@example.com").await;
+        let schema = schema(&pool);
+        let food = collection_id(&create_collection(&schema, "u1", "Food").await);
+        sqlx::query("DELETE FROM collections WHERE id = $1").bind(&food).execute(&pool).await.unwrap();
+
+        assert!(create_collection(&schema, "u1", "Food").await.errors.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn the_migration_renames_existing_duplicates_instead_of_failing(pool: PgPool) {
+        add_user(&pool, "u1", "ann", "ann@example.com").await;
+        add_user(&pool, "u2", "bob", "bob@example.com").await;
+        sqlx::query("DROP INDEX collections_user_name_unique").execute(&pool).await.unwrap();
+        for (id, user, name, age_days) in [
+            ("a", "u1", "Food", 3),
+            ("b", "u1", "food ", 2),
+            ("c", "u1", "FOOD", 1),
+            ("d", "u1", "Food (2)", 0),
+            ("e", "u2", "Food", 0),
+        ] {
+            sqlx::query(
+                "INSERT INTO collections (id, name, language, user_id, created_at)
+                 VALUES ($1, $2, 'pl|en', $3, now() - ($4 * interval '1 day'))",
+            )
+            .bind(id).bind(name).bind(user).bind(age_days)
+            .execute(&pool).await.unwrap();
+        }
+
+        sqlx::raw_sql(include_str!("../migrations/0006_unique_collection_names.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let names: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, name FROM collections ORDER BY id").fetch_all(&pool).await.unwrap();
+        let name = |id: &str| names.iter().find(|(i, _)| i == id).unwrap().1.clone();
+        assert_eq!(name("a"), "Food", "the oldest keeps its name");
+        assert_eq!(name("b"), "food (2)");
+        assert_eq!(name("c"), "FOOD (3)");
+        assert!(name("d").starts_with("Food (2)"), "{}", name("d"));
+        assert_eq!(name("e"), "Food", "other users are untouched");
     }
 }
